@@ -32,6 +32,7 @@ import { Mistral } from "@mistralai/mistralai";
 import Kernel from "@onkernel/sdk";
 import { killDesktop, getDesktop } from "@/lib/e2b/utils";
 import { resolution } from "@/lib/e2b/tool";
+import sharp from "sharp";
 
 // Mistral AI Configuration - HARDCODED
 const MISTRAL_API_KEY = "6kC3YYU0fstrvm9WCQudLOKEK53DhvNU";
@@ -41,12 +42,64 @@ const MISTRAL_MODEL = "mistral-medium-2508";
 const ONKERNEL_API_KEY = "sk_85dd38ea-b33f-45b5-bc33-0eed2357683a.t2lQgq3Lb6DamEGhcLiUgPa1jlx+1zD4BwAdchRHYgA";
 const kernelClient = new Kernel({ apiKey: ONKERNEL_API_KEY });
 
+const GRID_SIZE = 10;
+const GRID_LABEL_INTERVAL = 100;
+
+function createGridSvg(width: number, height: number) {
+  const verticalLines = Array.from({ length: Math.floor(width / GRID_SIZE) + 1 }, (_, idx) => {
+    const x = idx * GRID_SIZE;
+    return `<line class="grid-line" x1="${x}" y1="0" x2="${x}" y2="${height}" />`;
+  }).join("");
+
+  const horizontalLines = Array.from({ length: Math.floor(height / GRID_SIZE) + 1 }, (_, idx) => {
+    const y = idx * GRID_SIZE;
+    return `<line class="grid-line" x1="0" y1="${y}" x2="${width}" y2="${y}" />`;
+  }).join("");
+
+  const labels: string[] = [];
+
+  for (let x = 0; x <= width; x += GRID_LABEL_INTERVAL) {
+    labels.push(`<text class="grid-label" x="${x + 2}" y="12">x=${x}</text>`);
+  }
+
+  for (let y = 0; y <= height; y += GRID_LABEL_INTERVAL) {
+    const labelY = Math.min(y + 12, height - 2);
+    labels.push(`<text class="grid-label" x="4" y="${labelY}">y=${y}</text>`);
+  }
+
+  return `
+    <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <style>
+          .grid-line { stroke: rgba(255, 0, 0, 0.28); stroke-width: 0.5; }
+          .grid-label { fill: rgba(255, 0, 0, 0.7); font-size: 10px; font-family: monospace; }
+        </style>
+      </defs>
+      ${verticalLines}
+      ${horizontalLines}
+      ${labels.join("")}
+    </svg>
+  `;
+}
+
+async function addGridOverlay(imageBuffer: Buffer) {
+  const metadata = await sharp(imageBuffer).metadata();
+  const width = metadata.width ?? resolution.x;
+  const height = metadata.height ?? resolution.y;
+  const gridSvg = createGridSvg(width, height);
+
+  return sharp(imageBuffer)
+    .composite([{ input: Buffer.from(gridSvg) }])
+    .png()
+    .toBuffer();
+}
+
 export const runtime = 'nodejs';
 export const maxDuration = 3600;
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const INSTRUCTIONS = `- 
+const INSTRUCTIONS = `-
   Nazywasz się Mistral i Jesteś Operatorem - zaawansowanym asystentem AI, który może bezpośrednio kontrolować przeglądarkę chromium, aby wykonywać zadania użytkownika. Twoja rola to **proaktywne działanie** z pełną transparentnością. Zawsze Pisz w stylu bardziej osobistym i narracyjnym. Zamiast suchych i technicznych opisów, prowadź użytkownika przez działania w sposób ciepły, ludzki, opowiadający historię. Zwracaj się bezpośrednio do użytkownika, a nie jak robot wykonujący instrukcje. Twórz atmosferę towarzyszenia, a nie tylko raportowania. Mów w czasie teraźniejszym i używaj przyjaznych sformułowań. Twój styl ma być płynny, naturalny i przyjazny. Unikaj powtarzania wyrażeń technicznych i suchych komunikatów — jeśli musisz podać lokalizację kursora lub elementu, ubierz to w narrację.
 
 WAZNE!!!!: ZAWSZE ODCZEKAJ CHWILE PO KLIKNIECIU BY DAC CZAS NA ZALADOWANIE SIE 
@@ -360,6 +413,7 @@ export async function POST(request: Request) {
               try {
                 let resultData: any = { type: "text", text: "" };
                 let resultText = "";
+                let gridBuffer: Buffer | null = null;
 
                 if (toolCall.name === "computer_use") {
                   const action = parsedArgs.action;
@@ -369,7 +423,9 @@ export async function POST(request: Request) {
                       const response = await kernelClient.browsers.computer.captureScreenshot(desktop.session_id);
                       const blob = await response.blob();
                       const buffer = Buffer.from(await blob.arrayBuffer());
-                      
+                      gridBuffer = await addGridOverlay(buffer);
+                      await new Promise((resolve) => setTimeout(resolve, 3000));
+
                       const timestamp = new Date().toISOString();
                       const width = resolution.x;
                       const height = resolution.y;
@@ -382,7 +438,8 @@ export async function POST(request: Request) {
 SCREEN: ${width}×${height} pixels | Aspect ratio: 4:3 | Origin: (0,0) at TOP-LEFT
 ⚠️  REMEMBER: Y=0 is at TOP, Y increases DOWNWARD (0→767)
 ⚠️  FORMAT: [X, Y] - horizontal first, then vertical
-⚠️  SZCZEGÓŁOWA ANALIZA WYMAGANA: Przeanalizuj dokładnie screenshot przed kolejnymi akcjami!`;
+⚠️  SZCZEGÓŁOWA ANALIZA WYMAGANA: Przeanalizuj dokładnie screenshot przed kolejnymi akcjami!
+AI-only overlay: 10px grid with coordinate labels every 100px applied to assistant-visible capture; user preview stays clean.`;
 
                       resultData = {
                         type: "image",
@@ -503,18 +560,20 @@ SCREEN: ${width}×${height} pixels | Aspect ratio: 4:3 | Origin: (0,0) at TOP-LE
                     }
                   }
 
-                  sendEvent({
-                    type: "tool-output-available",
-                    toolCallId: toolCall.id,
-                    output: resultData,
-                  });
+                sendEvent({
+                  type: "tool-output-available",
+                  toolCallId: toolCall.id,
+                  output: resultData,
+                });
 
-                  return {
-                    tool_call_id: toolCall.id,
-                    role: "tool",
-                    content: resultText,
-                    image: action === "screenshot" ? resultData.data : undefined,
-                  };
+                const gridImageBase64 = gridBuffer ? gridBuffer.toString("base64") : undefined;
+
+                return {
+                  tool_call_id: toolCall.id,
+                  role: "tool",
+                  content: resultText,
+                  image: action === "screenshot" ? gridImageBase64 : undefined,
+                };
                 } else if (toolCall.name === "bash_command") {
                   const result = await kernelClient.browsers.process.exec(desktop.session_id, {
                     command: parsedArgs.command,
