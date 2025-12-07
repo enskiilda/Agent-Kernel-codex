@@ -52,7 +52,7 @@ export function Input({
   };
 
   return (
-    <div className="flex flex-col rounded-[28px] p-2 transition-colors bg-[#f6f6f6] dark:bg-[#303030]">
+    <div className="flex flex-col rounded-[28px] p-2 transition-colors bg-[#f6f6f6] dark:bg-[#f6f6f6]">
       <textarea
         ref={textareaRef}
         rows={1}
